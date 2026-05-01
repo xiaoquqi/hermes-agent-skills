@@ -1,3 +1,0 @@
-0000000000000000000000000000000000000000 b2c60bbf477b19074b85c0e0a49cc3a7dce1a938 Hermes Agent <hermes@local> 1776736843 +0800	commit (initial): Initial commit: 27 skill directories
-b2c60bbf477b19074b85c0e0a49cc3a7dce1a938 bd0b2d53d712b109c5f422a8bdb7d71af6e274df Hermes Agent <hermes@local> 1777604614 +0800	commit: refactor: 清理冗余脚本，固化 jira-fetcher + jira-issue-summary 技能
-bd0b2d53d712b109c5f422a8bdb7d71af6e274df e0d64b6b59257604a7001613e1602bcffe81f06f Hermes Agent <hermes@local> 1777604655 +0800	commit: docs: skill-git-manager 新增 .gitignore 规范和 commit 前检查习惯
