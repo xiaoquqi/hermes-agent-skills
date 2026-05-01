@@ -170,10 +170,19 @@ dev-insights/
 - 强调"结构性判断"，避免主观臆断
 ```
 
+## 读取文件技巧（重要）
+
+parsed 目录可能有 80+ 个文件，用 execute_code 逐个 read_file 会触发 50 次 tool call 上限。
+
+**正确做法**：用 terminal 拼接文件后一次性读取：
+```bash
+cd {parsed_dir} && cat *.summary.md > /tmp/summary_all.txt && cat *.detailed.md > /tmp/detailed_all.txt
+```
+然后读 `/tmp/summary_all.txt` 和 `/tmp/detailed_all.txt` 两个文件即可。
+
 ## 注意事项
 
 - 周报日期范围自动推导（周一→周日），文件名前缀用 `YYYYMMDD-YYYYMMDD` 格式
 - 月报直接用 `YYYYMM` 格式
-- parsed 文件为扁平结构（每个 issue 一个 .summary.md + 一个 .detailed.md），读取时用 glob 匹配
 - 输出前自动创建 `dev-insights/reports/` 目录
 - skill 变更后自动 push 到 git@github.com:xiaoquqi/hermes-agent-skills.git
