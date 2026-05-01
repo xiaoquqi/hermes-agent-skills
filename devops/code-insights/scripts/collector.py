@@ -3,7 +3,7 @@
 """
 GitLab Commit Patch 采集脚本
 
-clone 项目到本地，用 git 命令提取 patch，按天存储。
+基于 clone_projects.sh 的分支规则，采集指定项目/分支的 commit patch，按天存储。
 
 输出结构：
   ~/.hermes/code-insights/commits/{date}/{project}/
@@ -12,6 +12,7 @@ clone 项目到本地，用 git 命令提取 patch，按天存储。
 """
 import urllib.request
 import urllib.error
+import urllib.parse
 import json
 import re
 import sys
@@ -28,7 +29,75 @@ GL_PASS    = os.environ.get('GITLAB_PASS',    'devops@HyperMotion')
 GL_GROUP_ID = os.environ.get('GITLAB_GROUP_ID', '36')
 
 BASE_DIR = Path.home() / ".hermes" / "code-insights"
-CACHE_DIR = Path.home() / ".hermes" / "gitlab-cache"  # 复用已有 token 缓存
+
+# ── 分支规则（与 clone_projects.sh 保持一致）────────────────────────────────
+# atomy/* 模块固定用 qa 分支
+# hypermotion/CI-CD 固定用 master 分支
+# 其他 hypermotion/* 默认用 saas_qa 分支
+DEFAULT_BRANCH = 'saas_qa'
+
+def resolve_branch(project_path):
+    """根据项目路径返回正确的分支名（与 clone_projects.sh 逻辑一致）"""
+    if project_path.startswith('atomy/'):
+        return 'qa'
+    if project_path == 'hypermotion/CI-CD':
+        return 'master'
+    return DEFAULT_BRANCH
+
+
+# ── 项目列表（与 clone_projects.sh 保持一致）─────────────────────────────────
+# 格式：(path_with_namespace, branch_override_or_None)
+# branch_override 为 None 时使用 resolve_branch() 自动判断
+PROJECT_LIST = [
+    # HyperBDR 组 - 大部分用 saas_qa，atomy 用 qa
+    ('hypermotion/deploy',            None),
+    ('hypermotion/CI-CD',             None),   # -> master
+    ('hypermotion/linux-agent',       None),
+    ('hypermotion/partclone',         None),
+    ('hypermotion/windows-agent',     None),
+    ('hypermotion/WinDsync',          None),
+    ('hypermotion/exporter',          None),
+    ('hypermotion/ant',               None),
+    ('hypermotion/crab',              None),
+    ('hypermotion/hamal',             None),
+    ('hypermotion/mass',              None),
+    ('hypermotion/minitgt',           None),
+    ('hypermotion/nezha',            None),
+    ('hypermotion/oneway',            None),
+    ('hypermotion/owl',               None),
+    ('hypermotion/porter',           None),
+    ('hypermotion/proxy',             None),
+    ('hypermotion/revenue',           None),
+    ('hypermotion/storplus',          None),
+    ('hypermotion/unicloud',         None),
+    ('hypermotion/linux-agent-syncer',None),
+    ('hypermotion/nirvana',          None),
+    ('hypermotion/supervisor-dashboard', None),
+    ('hypermotion/newmuse',          None),
+    ('hypermotion/ci-cd-config',     None),
+    ('hypermotion/images',           None),
+    ('hypermotion/httpd-coding-builder', None),
+    ('hypermotion/SwiftS3Block',     None),
+    ('atomy/atomy',                   None),    # -> qa
+    ('atomy/atomy-api',              None),    # -> qa
+    ('atomy/atomy-mistral',          None),    # -> qa
+    ('atomy/atomy-mistral-lib',      None),    # -> qa
+    ('atomy/atomy-mistral-plugins',  None),    # -> qa
+    ('atomy/atomy-obstor',           None),    # -> qa
+    ('atomy/atomy-unicloud',        None),    # -> qa
+    ('atomy/atomy-s3block',         None),    # -> qa
+    ('atomy/HyperUp',               None),    # -> qa
+    ('atomy/hamalv3',               None),     # -> qa
+
+    # income 组
+    ('hypermotion/income',           None),
+    ('hypermotion/income_dashboard',  None),
+
+    # FC 组
+    ('hypermotion/prophet',         None),
+    ('hypermotion/calculator',       None),
+]
+
 
 # ── 日期解析 ────────────────────────────────────────────────────────────────
 def parse_date(date_arg):
@@ -65,25 +134,28 @@ def api(path, token, timeout=20):
         return json.loads(r.read())
 
 
-def get_group_projects(token):
-    """获取 hypermotion 组下所有项目"""
-    projects = []
-    for page in range(1, 30):
-        try:
-            result = api(f'/groups/{GL_GROUP_ID}/projects?page={page}&order_by=last_activity_at', token)
-            if not result:
-                break
-            projects.extend([p for p in result if p['path_with_namespace'].startswith('hypermotion/')])
-            if len(result) < 100:
-                break
-        except Exception as e:
-            print(f'  [WARN] group projects page {page}: {e}', flush=True)
-            break
-    return projects
+def find_project_by_path(token, project_path):
+    """通过 path_with_namespace 查找项目信息。
+
+    用项目名（path 最后一段）搜索，然后匹配完整 path_with_namespace。
+    避免 URL-encoding 斜杠导致搜索失败。
+    """
+    proj_name = project_path.rsplit('/', 1)[-1]  # e.g. "nezha"
+    try:
+        result = api(f'/projects?search={urllib.parse.quote(proj_name)}&per_page=50', token)
+        for p in result:
+            if p.get('path_with_namespace') == project_path:
+                return p
+    except Exception:
+        pass
+    return None
 
 
-def get_project_commits_for_date(token, project_id, project_name, date_str):
-    """获取项目在指定日期的 commits（通过 commits API）"""
+def get_project_commits_for_date(token, project_id, branch, date_str):
+    """
+    获取项目指定分支在指定日期的 commits。
+    使用 ref_name 过滤分支，不再用 all=true 拉所有分支。
+    """
     from urllib.parse import quote
     after = (datetime.strptime(date_str, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
     until_encoded = quote(f"{date_str} 23:59:59", safe='')
@@ -91,19 +163,19 @@ def get_project_commits_for_date(token, project_id, project_name, date_str):
     for page in range(1, 30):
         try:
             url = (f'/projects/{project_id}/repository/commits'
-                   f'?all=true&since={after}&until={until_encoded}&page={page}')
+                   f'?ref_name={branch}'
+                   f'&since={after}&until={until_encoded}'
+                   f'&page={page}')
             result = api(url, token)
             if not result:
                 break
             if isinstance(result, dict):
                 result = result.get('list', []) or []
-            # 过滤出当日日期的 commit
-            filtered_this_page = 0
+            # ref_name + since/until 组合已经能精确过滤，不需要再次按日期筛选
             for c in result:
                 committed_date = (c.get('committed_date', '') or '')[:10]
                 if committed_date == date_str:
                     commits.append(c)
-                    filtered_this_page += 1
             if len(result) < 100:
                 break
         except Exception:
@@ -112,15 +184,12 @@ def get_project_commits_for_date(token, project_id, project_name, date_str):
 
 
 # ── Git 操作 ─────────────────────────────────────────────────────────────────
-def clone_project(project_url, clone_dir, depth=100):
-    """Shallow clone 项目"""
+def clone_project(project_url, clone_dir, branch, depth=100):
+    """Shallow clone 指定分支的项目"""
     from urllib.parse import urlparse, urlunparse, quote
     # 修正 clone URL：替换不可达的 host，并嵌入认证信息
-    # 项目 http_url_to_repo 可能是 http://office.oneprocloud.com:20080/...
-    # GL_URL 格式：http://192.168.10.254:20080
     gl_netloc = urlparse(GL_URL).netloc  # e.g. "192.168.10.254:20080"
     parsed = urlparse(project_url)
-    # 嵌入认证：username = GL_USER, password = GL_PASS (URL-encoded)
     auth_netloc = f"{quote(GL_USER, safe='')}:{quote(GL_PASS, safe='')}@{gl_netloc}"
     project_url = urlunparse(('http', auth_netloc, parsed.path, parsed.params, parsed.query, ''))
 
@@ -131,8 +200,8 @@ def clone_project(project_url, clone_dir, depth=100):
     cmd = [
         'git', 'clone',
         '--depth', str(depth),
-        '--no-single-branch',
-        '--bare',  # bare 模式不需要 worktree，节省空间
+        '--branch', branch,
+        '--single-branch',
         project_url,
         str(clone_dir)
     ]
@@ -142,117 +211,99 @@ def clone_project(project_url, clone_dir, depth=100):
     return clone_dir
 
 
-def get_commits_for_date(clone_dir, date_str):
-    """获取指定日期的所有 commit 元数据"""
-    since = f"{date_str} 00:00:00"
-    until = f"{date_str} 23:59:59"
-
-    cmd = [
-        'git', '-C', str(clone_dir), 'log',
-        '--since', since,
-        '--until', until,
-        '--format', '%H|%an|%ae|%ad|%s',
-        '--date=iso',
-        '--all'
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-
-    commits = []
-    for line in result.stdout.strip().split('\n'):
-        if not line.strip():
-            continue
-        parts = line.split('|', 4)
-        if len(parts) < 5:
-            continue
-        sha, author_name, author_email, committed_date, message = parts
-        commits.append({
-            'sha': sha,
-            'author_name': author_name,
-            'author_email': author_email,
-            'committed_date': committed_date.strip(),
-            'message': message.strip()[:200],
-        })
-    return commits
-
-
 def save_commit_patch(clone_dir, sha, output_patch_path):
     """保存单个 commit 的 patch 文件"""
-    # 获取 patch（不含 commit 信息，只有 diff）
+    # git show 输出完整的 diff（不过滤文件）
     cmd = ['git', '-C', str(clone_dir), 'show', sha, '--format=', '--patch']
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-    # 如果没有 patch 内容（binary 文件等），写入空文件
     output_patch_path.write_text(result.stdout or '')
 
 
-# ── 主采集逻辑 ────────────────────────────────────────────────────────────────
+# ── 过滤无效 commit ──────────────────────────────────────────────────────────
+SKIP_AUTHORS = {'gitlab', 'bot', 'system', ''}
+
+def filter_commit(commit):
+    """过滤无效 commit，返回 None 或过滤后的 dict"""
+    author = (commit.get('author_name', '') or '').lower()
+    if author in SKIP_AUTHORS:
+        return None
+    msg = (commit.get('message', '') or '').split('\n')[0].strip()
+    if re.match(r"^Merge branch", msg):
+        return None
+    return {
+        'sha': commit.get('id', '') or '',
+        'author_name': commit.get('author_name', '') or '',
+        'author_email': commit.get('author_email', '') or '',
+        'committed_date': (commit.get('committed_date', '') or '')[:19],
+        'message': msg[:200],
+    }
+
+
+# ── 主采集逻辑 ───────────────────────────────────────────────────────────────
 def collect_commits(date_str, dry_run=False):
     """
-    采集指定日期的所有 GitLab commit patch 和元数据
+    采集指定日期的所有 GitLab commit patch 和元数据。
+    分支规则：atomy/* -> qa, CI-CD -> master, 其他 -> saas_qa
     """
     print(f"[code-insights] date={date_str}", flush=True)
 
     token = get_token()
     print("[code-insights] token ok", flush=True)
 
-    projects = get_group_projects(token)
-    print(f"[code-insights] found {len(projects)} projects in group {GL_GROUP_ID}", flush=True)
-
     commits_dir = BASE_DIR / "commits" / date_str
     commits_dir.mkdir(parents=True, exist_ok=True)
 
     total_commits = 0
     processed_projects = 0
+    skipped_projects = 0
 
-    for proj in projects:
-        pid = proj['id']
-        pname = proj['path_with_namespace']
-        web_url = proj['http_url_to_repo']
+    for project_path, branch_override in PROJECT_LIST:
+        branch = branch_override if branch_override else resolve_branch(project_path)
 
-        print(f"\n  [{pname}]", flush=True)
+        # 1. 查找项目 ID
+        proj_info = find_project_by_path(token, project_path)
+        if not proj_info:
+            print(f"\n  [{project_path}] 项目不存在，跳过", flush=True)
+            skipped_projects += 1
+            continue
 
-        # 1. 直接用 commits API 获取当日 commits
-        commits_data = get_project_commits_for_date(token, pid, pname, date_str)
+        pid = proj_info['id']
+        web_url = proj_info['http_url_to_repo']
+
+        print(f"\n  [{project_path}] (branch={branch})", flush=True)
+
+        # 2. 获取当日 commits（指定分支）
+        commits_data = get_project_commits_for_date(token, pid, branch, date_str)
         if not commits_data:
-            print(f"    无当日 commit，跳过", flush=True)
+            print(f"    无当日 commit", flush=True)
             continue
 
         print(f"    {len(commits_data)} 个 commit，开始采集...", flush=True)
 
-        # 2. Clone 到临时目录
-        tmp_clone = Path(f"/tmp/code-insights-{date_str}-{pname.replace('/', '_')}")
+        # 3. Clone 指定分支到临时目录
+        tmp_clone = Path(f"/tmp/code-insights-{date_str}-{project_path.replace('/', '_')}")
         try:
-            clone_project(web_url, tmp_clone)
+            clone_project(web_url, tmp_clone, branch)
         except Exception as e:
             print(f"    clone 失败: {e}", flush=True)
             continue
 
         try:
-            # 3. 直接用 API 返回的数据，过滤无效 commit
+            # 4. 过滤无效 commit
             filtered = []
             for c in commits_data:
-                author = (c.get('author_name', '') or '').lower()
-                msg = (c.get('message', '') or '').split('\n')[0].strip()
-                if author in ('gitlab', 'bot', 'system', ''):
-                    continue
-                if re.match(r"^Merge branch", msg):
-                    continue
-                filtered.append({
-                    'sha': c.get('id', '') or '',
-                    'author_name': c.get('author_name', '') or '',
-                    'author_email': c.get('author_email', '') or '',
-                    'committed_date': (c.get('committed_date', '') or '')[:19],
-                    'message': msg[:200],
-                })
+                filtered_c = filter_commit(c)
+                if filtered_c:
+                    filtered.append(filtered_c)
 
             if not filtered:
-                print(f"    过滤后无有效 commit，跳过", flush=True)
+                print(f"    过滤后无有效 commit", flush=True)
                 continue
 
             print(f"    {len(filtered)} 个有效 commit", flush=True)
 
             # 5. 创建输出目录
-            out_proj = commits_dir / pname
+            out_proj = commits_dir / project_path
             out_proj.mkdir(parents=True, exist_ok=True)
 
             # 6. 保存 patch 文件
@@ -261,14 +312,13 @@ def collect_commits(date_str, dry_run=False):
                 patch_path = out_proj / f"{sha}.patch"
                 save_commit_patch(tmp_clone, sha, patch_path)
 
-            # 7. 保存元数据
+            # 7. 保存元数据（追加去重）
             meta_path = out_proj / "commits.json"
             existing = []
             if meta_path.exists():
                 with open(meta_path) as f:
                     existing = json.load(f)
 
-            # 合并去重
             existing_shas = {c['sha'] for c in existing}
             for c in filtered:
                 if c['sha'] not in existing_shas:
@@ -281,13 +331,13 @@ def collect_commits(date_str, dry_run=False):
             processed_projects += 1
 
         finally:
-            # 清理临时 clone
             if tmp_clone.exists():
                 shutil.rmtree(tmp_clone)
 
     print(f"\n[code-insights] ✅ 完成！", flush=True)
     print(f"  日期: {date_str}", flush=True)
     print(f"  处理项目数: {processed_projects}", flush=True)
+    print(f"  跳过项目数: {skipped_projects}", flush=True)
     print(f"  commit 总数: {total_commits}", flush=True)
     print(f"  输出目录: {commits_dir}", flush=True)
     return processed_projects, total_commits
