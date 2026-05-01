@@ -99,6 +99,46 @@ git show {commit_id} --format= --patch > {commit_id}.patch
 - author 为 `gitlab/bot/system/空` 的自动化提交
 - message 以 `Merge branch` 开头的 merge commit
 
+## 已知坑（调试记录）
+
+### git show 的 `-- patch` 不是你想的那样
+```bash
+# ❌ 错误：git 把 "patch" 当文件路径，只输出那个文件的 diff（不存在就为空）
+git show {sha} --format= -- patch
+
+# ✅ 正确：用 --patch 标志，不过滤文件
+git show {sha} --format= --patch
+```
+
+### 项目搜索 API 不接受 URL-encoded 斜杠
+```python
+# ❌ 错误：urllib.parse.quote('hypermotion/nezha') → 'hypermotion%2Fnezha'，搜不到
+api(f'/projects?search={urllib.parse.quote(project_path)}')
+
+# ✅ 正确：只搜索项目名（路径最后一段），然后用完整 path_with_namespace 匹配
+proj_name = project_path.rsplit('/', 1)[-1]  # → "nezha"
+result = api(f'/projects?search={proj_name}&per_page=50')
+for p in result:
+    if p['path_with_namespace'] == project_path:
+        return p
+```
+
+### ref_name 不要加 `origin/` 前缀
+```python
+# ❌ 错误：ref_name=origin/saas_qa 返回 0 结果
+# ✅ 正确：ref_name=saas_qa
+GET /projects/{id}/repository/commits?ref_name=saas_qa&since=&until=
+```
+
+### `all=true` 会拉所有分支，引入噪音
+```python
+# ❌ 错误：all=true 会拉所有分支的 commits，包括不在 default branch 上的 feature 分支
+GET /projects/{id}/repository/commits?all=true&since=&until=
+
+# ✅ 正确：配合 ref_name 只拉指定分支
+GET /projects/{id}/repository/commits?ref_name=saas_qa&since=&until=
+```
+
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
