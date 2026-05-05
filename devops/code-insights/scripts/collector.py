@@ -29,6 +29,8 @@ GL_PASS    = os.environ.get('GITLAB_PASS',    'devops@HyperMotion')
 GL_GROUP_ID = os.environ.get('GITLAB_GROUP_ID', '36')
 
 BASE_DIR = Path.home() / ".hermes" / "code-insights"
+# 共享本地持久 clone 目录（与 reporter.py 共用）
+REPOS_DIR = BASE_DIR / "repos"
 
 # ── 分支规则（与 clone_projects.sh 保持一致）────────────────────────────────
 # atomy/* 模块固定用 qa 分支
@@ -185,7 +187,7 @@ def get_project_commits_for_date(token, project_id, branch, date_str):
 
 # ── Git 操作 ─────────────────────────────────────────────────────────────────
 def clone_project(project_url, clone_dir, branch, depth=100):
-    """Shallow clone 指定分支的项目"""
+    """Shallow clone 指定分支的项目到持久化本地目录"""
     from urllib.parse import urlparse, urlunparse, quote
     # 修正 clone URL：替换不可达的 host，并嵌入认证信息
     gl_netloc = urlparse(GL_URL).netloc  # e.g. "192.168.10.254:20080"
@@ -193,8 +195,13 @@ def clone_project(project_url, clone_dir, branch, depth=100):
     auth_netloc = f"{quote(GL_USER, safe='')}:{quote(GL_PASS, safe='')}@{gl_netloc}"
     project_url = urlunparse(('http', auth_netloc, parsed.path, parsed.params, parsed.query, ''))
 
-    if clone_dir.exists():
-        shutil.rmtree(clone_dir)
+    # 如果已存在持久 clone，直接复用（不做删除）
+    if clone_dir.exists() and (clone_dir / '.git').exists():
+        # 可选：git fetch 更新到最新
+        fetch_cmd = ['git', '-C', str(clone_dir), 'fetch', '--depth', str(depth), 'origin', branch]
+        subprocess.run(fetch_cmd, capture_output=True, text=True, timeout=60)
+        return clone_dir
+
     clone_dir.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
@@ -280,10 +287,10 @@ def collect_commits(date_str, dry_run=False):
 
         print(f"    {len(commits_data)} 个 commit，开始采集...", flush=True)
 
-        # 3. Clone 指定分支到临时目录
-        tmp_clone = Path(f"/tmp/code-insights-{date_str}-{project_path.replace('/', '_')}")
+        # 3. Clone 指定分支到持久化本地目录（不删）
+        local_clone = REPOS_DIR / project_path
         try:
-            clone_project(web_url, tmp_clone, branch)
+            clone_project(web_url, local_clone, branch)
         except Exception as e:
             print(f"    clone 失败: {e}", flush=True)
             continue
@@ -310,7 +317,7 @@ def collect_commits(date_str, dry_run=False):
             for c in filtered:
                 sha = c['sha']
                 patch_path = out_proj / f"{sha}.patch"
-                save_commit_patch(tmp_clone, sha, patch_path)
+                save_commit_patch(local_clone, sha, patch_path)
 
             # 7. 保存元数据（追加去重）
             meta_path = out_proj / "commits.json"
@@ -331,8 +338,7 @@ def collect_commits(date_str, dry_run=False):
             processed_projects += 1
 
         finally:
-            if tmp_clone.exists():
-                shutil.rmtree(tmp_clone)
+            pass  # 持久 clone 保留不删（与 reporter.py 共享）
 
     print(f"\n[code-insights] ✅ 完成！", flush=True)
     print(f"  日期: {date_str}", flush=True)
