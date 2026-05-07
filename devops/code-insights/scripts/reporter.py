@@ -330,8 +330,8 @@ def _build_prompt(template: str, **kwargs) -> str:
 def process_commit(commit, patch_content, project_path, report_root, is_summary: bool, work_dir: str = None):
     """处理单个 commit，生成 summary 或 detailed 报告（支持大 patch 分块）"""
     sha     = commit["sha"]
-    author  = commit["author_name"]
-    date    = commit["committed_date"]
+    author  = commit["author"]
+    date    = commit["date"]
     message = commit["message"]
     branch  = resolve_branch(project_path)
     added, removed = count_patch_stats(patch_content)
@@ -403,13 +403,14 @@ def main(date_str: str):
         project_path = str(json_file.parent.relative_to(commits_base))
         commits_data = json.loads(json_file.read_text())
 
-        print(f"\n📦 {project_path}: {len(commits_data)} commits")
+        commits_list = commits_data.get("commits", [])
+        print(f"\n📦 {project_path}: {len(commits_list)} commits")
 
         # 为每个项目尝试 clone 一次（如果需要）
         work_dir = None
         clone_success = False
 
-        for commit in commits_data:
+        for commit in commits_list:
             sha = commit["sha"]
             patch_file = json_file.parent / f"{sha}.patch"
             if not patch_file.exists():
@@ -418,7 +419,7 @@ def main(date_str: str):
 
             patch_content = patch_file.read_text()
             chunks = split_patch(patch_content)  # 缓存，避免重复解析
-            print(f"  🔍 {sha[:8]} | {commit['author_name']} | {len(patch_content.splitlines())} 行 patch")
+            print(f"  🔍 {sha[:8]} | {commit['author']} | {len(patch_content.splitlines())} 行 patch")
 
             # 尝试 clone 并应用 patch（只尝试一次 per 项目）
             if not clone_success:

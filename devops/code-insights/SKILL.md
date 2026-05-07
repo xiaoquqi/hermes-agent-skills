@@ -122,7 +122,17 @@ POST http://192.168.10.254:20080/oauth/token
 
 ### 项目列表
 
-PROJECT_LIST 硬编码，与 clone_projects.sh 保持一致，覆盖 HyperBDR/income/FC 三个项目组。
+`PROJECTS` 列表定义在 `collector.py` 顶部，格式：
+```python
+PROJECTS = [
+    {"group": "hypermotion", "project": "nezha",     "path_with_namespace": "hypermotion/nezha"},
+    {"group": "hypermotion", "project": "mass",      "path_with_namespace": "hypermotion/mass"},
+    {"group": "hypermotion", "project": "deploy",    "path_with_namespace": "hypermotion/deploy"},
+    {"group": "atomy",       "project": "hamalv3",   "path_with_namespace": "atomy/hamalv3"},
+]
+```
+
+按需增删，范围由 Ray 确认后扩展。
 
 ### Commits API
 
@@ -161,7 +171,46 @@ git show {commit_id} --format= --patch > {commit_id}.patch
 
 ## 已知坑（调试记录）
 
-### git show 的 `-- patch` 不是你想的那样
+### `commits.json` 是 dict 结构，不是 list
+```python
+# ❌ 错误：直接遍历 dict
+for commit in commits_data:
+    sha = commit["sha"]
+
+# ✅ 正确：取 commits 字段
+commits_list = commits_data.get("commits", [])
+for commit in commits_list:
+    sha = commit["sha"]
+```
+完整结构：
+```json
+{
+  "date": "2026-04-30",
+  "group": "hypermotion",
+  "project": "nezha",
+  "branch": "saas_qa",
+  "commits": [...]
+}
+```
+
+### commits.json 的字段名（与 GitLab API 不同）
+```python
+# ✅ collector 保存的字段
+commit["sha"]       # 不是 "id"
+commit["author"]    # 不是 "author_name"
+commit["date"]      # 不是 "committed_date"
+commit["message"]   # 就是这个
+```
+
+### `resolve_branch()` 入参是 `path_with_namespace`，不是 `project`
+```python
+# ❌ 错误：用 project 字段匹配，atomy/hamalv3 会匹配失败（因为 "hamalv3" 不含 "atomy"）
+branch = resolve_branch(project)
+
+# ✅ 正确：用完整 path_with_namespace 匹配
+branch = resolve_branch("atomy/hamalv3")  # → "qa"
+branch = resolve_branch("hypermotion/nezha")  # → "saas_qa"
+```
 ```bash
 # ❌ 错误：git 把 "patch" 当文件路径，只输出那个文件的 diff（不存在就为空）
 git show {sha} --format= -- patch
