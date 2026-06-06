@@ -29,6 +29,13 @@ yarn-error.log*
 .curator_state
 .usage.json
 .usage.json.lock
+.hub/
+.bundled_manifest
+
+# Generated/downloaded assets (not skill source)
+**/*.info.json
+**/docs/readme/*.png
+**/docs/readme/*.gif
 
 # Hermès skill internal
 **/.skill-tmp/
